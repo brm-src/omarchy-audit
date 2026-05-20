@@ -4,6 +4,8 @@
 
 TUI interactiva para auditar y limpiar tu instalación de [omarchy](https://omarchy.org).
 
+![demo](demo.gif)
+
 Pacseek y bauh te dejan desinstalar paquetes, pero no saben qué viene de fábrica con omarchy y qué agregaste tú. **omarchy-audit lee el manifiesto de paquetes propio de omarchy**, así te dice exactamente cuáles son del sistema (no tocar) y cuáles instalaste tú (probablemente puedes eliminarlos).
 
 ```

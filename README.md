@@ -4,6 +4,8 @@
 
 Interactive TUI to audit and clean up an [omarchy](https://omarchy.org) install.
 
+![demo](demo.gif)
+
 Pacseek and bauh let you uninstall packages, but they don't know what omarchy shipped versus what you added. **omarchy-audit reads omarchy's own package manifest** so it can tell you which packages came from the distro (don't touch) and which you installed yourself (probably safe to remove).
 
 ```
