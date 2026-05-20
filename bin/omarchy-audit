@@ -1,0 +1,388 @@
+#!/bin/bash
+# omarchy-audit — interactive TUI for cleaning up an omarchy install
+#
+# Categorizes installed packages against the omarchy manifest so you can
+# safely uninstall what you don't use, prune orphans, and clear stale cache.
+# Dry-run by default. Pacman is the safety net: it refuses to remove
+# anything still depended on.
+#
+# Requires: bash 5+, pacman, gum (charm.sh), expac (optional, faster sizes)
+# License: MIT
+
+set -euo pipefail
+
+readonly OMARCHY_PATH="${OMARCHY_PATH:-$HOME/.local/share/omarchy}"
+readonly BASE_MANIFEST="$OMARCHY_PATH/install/omarchy-base.packages"
+readonly OTHER_MANIFEST="$OMARCHY_PATH/install/omarchy-other.packages"
+readonly CACHE_DIR="/var/cache/pacman/pkg"
+
+# Language detection — Spanish if locale starts with es_, English otherwise.
+# Override with OMARCHY_AUDIT_LANG=en|es.
+detect_lang() {
+  local override="${OMARCHY_AUDIT_LANG:-}"
+  if [[ -n "$override" ]]; then echo "$override"; return; fi
+  case "${LANG:-}" in
+    es*|ES*) echo es ;;
+    *) echo en ;;
+  esac
+}
+readonly LANG_CODE=$(detect_lang)
+
+# String table. Keep keys identical between locales.
+declare -A T_EN=(
+  [title]="omarchy-audit"
+  [core]="Core omarchy"
+  [core_note]="packages (don't touch)"
+  [user]="Yours"
+  [user_note]="packages (you installed these)"
+  [orphans]="Orphans"
+  [orphans_note]="orphaned dependencies"
+  [cache]="Pacman cache"
+  [cache_note]="on disk"
+  [menu_user]="📦 Review my packages (the ones I installed)"
+  [menu_orphans]="👻 Clean orphans"
+  [menu_cache]="🗑️  Clean pacman cache"
+  [menu_core]="🔒 View core omarchy (read-only)"
+  [menu_quit]="Quit"
+  [picker_user]="Yours · packages NOT shipped with omarchy"
+  [picker_orphans]="Orphans · dependencies nothing needs anymore"
+  [picker_help]="space = mark · enter = continue · esc = cancel"
+  [empty]="(nothing to show)"
+  [no_orphans]="✓ No orphans."
+  [pacman_will_remove]="Pacman will report what it removes (including deps):"
+  [pacman_refused]="Pacman refused. Usually means something still depends on a marked package."
+  [confirm_remove]="Run 'sudo pacman -Rs %s'?"
+  [cancelled]="Cancelled."
+  [nothing_selected]="Nothing selected."
+  [cache_summary]="Pacman cache: %s"
+  [paccache_missing]="Missing 'paccache'. Install: sudo pacman -S pacman-contrib"
+  [cache_old]="Drop old versions (keep last 3) — recommended"
+  [cache_uninstalled]="Drop ALL files for uninstalled packages"
+  [cancel]="Cancel"
+  [press_enter]="press enter to return to menu..."
+  [missing_tools]="Missing required tools:"
+  [install_with]="Install with: sudo pacman -S"
+)
+declare -A T_ES=(
+  [title]="omarchy-audit"
+  [core]="Core omarchy"
+  [core_note]="paquetes (no tocar)"
+  [user]="Tuyos"
+  [user_note]="paquetes (instalaste tú)"
+  [orphans]="Huérfanos"
+  [orphans_note]="dependencias sin uso"
+  [cache]="Cache pacman"
+  [cache_note]="en disco"
+  [menu_user]="📦 Revisar mis paquetes (los que YO instalé)"
+  [menu_orphans]="👻 Limpiar huérfanos"
+  [menu_cache]="🗑️  Limpiar cache pacman"
+  [menu_core]="🔒 Ver core omarchy (solo lectura)"
+  [menu_quit]="Salir"
+  [picker_user]="Tuyos · paquetes que NO vienen con omarchy"
+  [picker_orphans]="Huérfanos · deps que ya nadie necesita"
+  [picker_help]="espacio = marcar · enter = continuar · esc = cancelar"
+  [empty]="(nada que mostrar)"
+  [no_orphans]="✓ No hay huérfanos."
+  [pacman_will_remove]="Pacman dirá qué removerá (incluyendo deps):"
+  [pacman_refused]="Pacman rechazó la operación. Suele significar que algo aún depende de un paquete marcado."
+  [confirm_remove]="¿Ejecutar 'sudo pacman -Rs %s'?"
+  [cancelled]="Cancelado."
+  [nothing_selected]="Nada seleccionado."
+  [cache_summary]="Cache pacman: %s"
+  [paccache_missing]="Falta 'paccache'. Instala: sudo pacman -S pacman-contrib"
+  [cache_old]="Limpiar versiones viejas (mantener 3 últimas) — recomendado"
+  [cache_uninstalled]="Limpiar TODO lo de paquetes desinstalados"
+  [cancel]="Cancelar"
+  [press_enter]="enter para volver al menú..."
+  [missing_tools]="Faltan herramientas requeridas:"
+  [install_with]="Instala con: sudo pacman -S"
+)
+
+t() {
+  # $1 = key. Returns the localized string for the active language.
+  local key="$1" val
+  if [[ "$LANG_CODE" == "es" ]]; then val="${T_ES[$key]:-}"; else val="${T_EN[$key]:-}"; fi
+  echo "${val:-$key}"
+}
+
+readonly C_RESET=$'\033[0m'
+readonly C_DIM=$'\033[2m'
+readonly C_BOLD=$'\033[1m'
+readonly C_RED=$'\033[31m'
+readonly C_GREEN=$'\033[32m'
+readonly C_YELLOW=$'\033[33m'
+readonly C_BLUE=$'\033[34m'
+readonly C_MAGENTA=$'\033[35m'
+readonly C_CYAN=$'\033[36m'
+
+require_bin() {
+  local missing=()
+  for bin in "$@"; do
+    command -v "$bin" >/dev/null || missing+=("$bin")
+  done
+  if (( ${#missing[@]} > 0 )); then
+    echo "${C_RED}$(t missing_tools)${C_RESET} ${missing[*]}" >&2
+    echo "$(t install_with) ${missing[*]}" >&2
+    exit 1
+  fi
+}
+
+require_bin pacman gum
+
+read_manifest() {
+  # Strips comments and blank lines from a packages manifest.
+  # $1 = manifest path
+  [[ -f "$1" ]] || return 0
+  grep -vE '^\s*(#|$)' "$1" | awk '{print $1}'
+}
+
+build_manifest_set() {
+  # Combines base + other manifests into a sorted unique set.
+  { read_manifest "$BASE_MANIFEST"; read_manifest "$OTHER_MANIFEST"; } | sort -u
+}
+
+list_explicit() {
+  # All explicitly-installed packages (Qet excludes deps already needed by another pkg).
+  pacman -Qeq
+}
+
+list_orphans() {
+  # Dependencies no longer required by any installed package.
+  pacman -Qtdq 2>/dev/null || true
+}
+
+human_size() {
+  # $1 = bytes; outputs e.g. "12.4 MB". Falls back to printf for portability.
+  numfmt --to=iec-i --suffix=B --format='%.1f' "$1" 2>/dev/null || echo "${1}B"
+}
+
+pkg_size_bytes() {
+  # Reports installed size in bytes for a single package.
+  if command -v expac >/dev/null; then
+    expac -Q '%m' "$1" 2>/dev/null || echo 0
+  else
+    pacman -Qi "$1" 2>/dev/null \
+      | awk -F': *' '/^Installed Size/ {
+          n=$2; sub(/ .*/,"",n); unit=$2; sub(/.* /,"",unit);
+          mult=1;
+          if (unit=="KiB") mult=1024;
+          else if (unit=="MiB") mult=1024*1024;
+          else if (unit=="GiB") mult=1024*1024*1024;
+          printf "%d", n*mult
+        }'
+  fi
+}
+
+categorize() {
+  # Splits explicit packages into:
+  #   core   — present in omarchy manifest (don't touch)
+  #   user   — explicit but NOT in manifest (probably yours)
+  local manifest_tmp explicit_tmp
+  manifest_tmp=$(mktemp); explicit_tmp=$(mktemp)
+  build_manifest_set > "$manifest_tmp"
+  list_explicit | sort -u > "$explicit_tmp"
+
+  comm -12 "$manifest_tmp" "$explicit_tmp" > "$1"   # core (intersection)
+  comm -13 "$manifest_tmp" "$explicit_tmp" > "$2"   # user-only
+
+  rm -f "$manifest_tmp" "$explicit_tmp"
+}
+
+cache_size_bytes() {
+  # Total bytes used by pacman cache (all generations).
+  local bytes
+  bytes=$(du -sb "$CACHE_DIR" 2>/dev/null | awk '{print $1}')
+  echo "${bytes:-0}"
+}
+
+cache_uninstalled_count() {
+  # How many cached files are NOT for currently-installed packages.
+  paccache -dvk0 2>/dev/null | grep -c '^.*$' || echo 0
+}
+
+show_overview() {
+  local core_file user_file
+  core_file=$(mktemp); user_file=$(mktemp)
+  categorize "$core_file" "$user_file"
+
+  local n_core n_user n_orphan n_cache_bytes
+  n_core=$(wc -l < "$core_file")
+  n_user=$(wc -l < "$user_file")
+  n_orphan=$(list_orphans | wc -l)
+  n_cache_bytes=$(cache_size_bytes)
+
+  gum style --border rounded --padding "1 2" --margin "1 0" --border-foreground 212 \
+    "${C_BOLD}$(t title)${C_RESET}  $(date '+%Y-%m-%d %H:%M')" \
+    "" \
+    "${C_GREEN}$(t core)${C_RESET}    $n_core $(t core_note)" \
+    "${C_CYAN}$(t user)${C_RESET}           $n_user $(t user_note)" \
+    "${C_YELLOW}$(t orphans)${C_RESET}       $n_orphan $(t orphans_note)" \
+    "${C_MAGENTA}$(t cache)${C_RESET}    $(human_size "$n_cache_bytes") $(t cache_note)"
+
+  rm -f "$core_file" "$user_file"
+}
+
+decorate_pkg() {
+  # Reads pkg names from stdin, outputs "name<TAB>description<TAB>size".
+  # Uses expac (single-process bulk query) when available — locale-safe and
+  # ~50x faster than running pacman -Qi per package.
+  local list
+  list=$(cat)
+  [[ -z "$list" ]] && return 0
+
+  if command -v expac >/dev/null; then
+    # %n=name, %d=description, %m=installed size in bytes
+    while IFS=$'\t' read -r name desc bytes; do
+      [[ -z "$name" ]] && continue
+      # Truncate long descriptions for TUI readability.
+      (( ${#desc} > 70 )) && desc="${desc:0:67}..."
+      printf '%s\t%s\t%s\n' "$name" "${desc:--}" "$(human_size "${bytes:-0}")"
+    done < <(printf '%s\n' "$list" | xargs -r expac -Q '%n\t%d\t%m')
+  else
+    # Fallback: force C locale so the field name is always "Description".
+    while read -r pkg; do
+      [[ -z "$pkg" ]] && continue
+      local desc size
+      desc=$(LC_ALL=C pacman -Qi "$pkg" 2>/dev/null \
+             | awk -F': *' '/^Description/ {print $2; exit}')
+      (( ${#desc} > 70 )) && desc="${desc:0:67}..."
+      size=$(human_size "$(pkg_size_bytes "$pkg")")
+      printf '%s\t%s\t%s\n' "$pkg" "${desc:--}" "$size"
+    done <<<"$list"
+  fi
+}
+
+select_packages() {
+  # Renders a multi-select gum picker on the given list and returns chosen names.
+  # $1 = title; reads pkg list from stdin
+  local title="$1"
+  local lines selected
+  lines=$(decorate_pkg | column -t -s $'\t' -o '  │  ' 2>/dev/null \
+          || decorate_pkg | sed 's/\t/  │  /g')
+
+  [[ -z "$lines" ]] && { echo "$(t empty)" >&2; return 1; }
+
+  selected=$(printf '%s\n' "$lines" | gum choose --no-limit \
+    --header "$title  · $(t picker_help)" \
+    --height 25) || return 1
+
+  printf '%s\n' "$selected" | awk '{print $1}'
+}
+
+confirm_remove() {
+  # Shows pacman -Rs --print before actually removing.
+  local pkgs=("$@")
+  (( ${#pkgs[@]} == 0 )) && { echo "$(t nothing_selected)"; return 0; }
+
+  echo
+  gum style --foreground 212 --bold "$(t pacman_will_remove)"
+  echo
+  if ! pacman -Rs --print "${pkgs[@]}" 2>&1; then
+    gum style --foreground 196 "$(t pacman_refused)"
+    return 1
+  fi
+  echo
+  if gum confirm "$(printf "$(t confirm_remove)" "${pkgs[*]}")"; then
+    sudo pacman -Rs "${pkgs[@]}"
+  else
+    echo "$(t cancelled)"
+  fi
+}
+
+action_user_packages() {
+  local user_file core_file
+  core_file=$(mktemp); user_file=$(mktemp)
+  categorize "$core_file" "$user_file"
+
+  local picked
+  picked=$(select_packages "$(t picker_user)" < "$user_file") || {
+    rm -f "$core_file" "$user_file"; return 0
+  }
+  rm -f "$core_file" "$user_file"
+
+  [[ -z "$picked" ]] && return 0
+  # shellcheck disable=SC2046
+  confirm_remove $(echo "$picked")
+}
+
+action_orphans() {
+  local orphan_file picked
+  orphan_file=$(mktemp); list_orphans > "$orphan_file"
+
+  if [[ ! -s "$orphan_file" ]]; then
+    gum style --foreground 46 "$(t no_orphans)"
+    rm -f "$orphan_file"; return 0
+  fi
+
+  picked=$(select_packages "$(t picker_orphans)" < "$orphan_file") || {
+    rm -f "$orphan_file"; return 0
+  }
+  rm -f "$orphan_file"
+
+  [[ -z "$picked" ]] && return 0
+  # shellcheck disable=SC2046
+  confirm_remove $(echo "$picked")
+}
+
+action_cache() {
+  local total_bytes
+  total_bytes=$(cache_size_bytes)
+
+  gum style --foreground 212 --bold "$(printf "$(t cache_summary)" "$(human_size "$total_bytes")")"
+  echo
+
+  command -v paccache >/dev/null || {
+    gum style --foreground 196 "$(t paccache_missing)"
+    return 1
+  }
+
+  local opt_old opt_uninst opt_cancel choice
+  opt_old="$(t cache_old)"
+  opt_uninst="$(t cache_uninstalled)"
+  opt_cancel="$(t cancel)"
+
+  choice=$(gum choose "$opt_old" "$opt_uninst" "$opt_cancel")
+
+  case "$choice" in
+    "$opt_old") sudo paccache -r ;;
+    "$opt_uninst") sudo paccache -ruk0 ;;
+    *) echo "$(t cancelled)" ;;
+  esac
+}
+
+action_show_core() {
+  # Read-only listing — just to satisfy curiosity.
+  local core_file user_file
+  core_file=$(mktemp); user_file=$(mktemp)
+  categorize "$core_file" "$user_file"
+
+  decorate_pkg < "$core_file" | column -t -s $'\t' -o '  │  ' 2>/dev/null \
+    | gum pager
+  rm -f "$core_file" "$user_file"
+}
+
+main_menu() {
+  while true; do
+    show_overview
+    local choice m_user m_orph m_cache m_core m_quit
+    m_user="$(t menu_user)"
+    m_orph="$(t menu_orphans)"
+    m_cache="$(t menu_cache)"
+    m_core="$(t menu_core)"
+    m_quit="$(t menu_quit)"
+
+    choice=$(gum choose "$m_user" "$m_orph" "$m_cache" "$m_core" "$m_quit") || exit 0
+
+    case "$choice" in
+      "$m_user")  action_user_packages ;;
+      "$m_orph")  action_orphans ;;
+      "$m_cache") action_cache ;;
+      "$m_core")  action_show_core ;;
+      "$m_quit")  exit 0 ;;
+    esac
+    echo
+    gum input --placeholder "$(t press_enter)" >/dev/null || true
+  done
+}
+
+main_menu
