@@ -39,9 +39,12 @@ declare -A T_EN=(
   [orphans_note]="orphaned dependencies"
   [cache]="Pacman cache"
   [cache_note]="on disk"
+  [webapps]="Web apps"
+  [webapps_note]="browser shortcuts"
   [menu_user]="📦 Review my packages (the ones I installed)"
   [menu_orphans]="👻 Clean orphans"
   [menu_cache]="🗑️  Clean pacman cache"
+  [menu_webapps]="🌐 Review web apps and shortcuts (read-only)"
   [menu_core]="🔒 View core omarchy (read-only)"
   [menu_quit]="Quit"
   [picker_user]="Yours · packages NOT shipped with omarchy"
@@ -73,9 +76,12 @@ declare -A T_ES=(
   [orphans_note]="dependencias sin uso"
   [cache]="Cache pacman"
   [cache_note]="en disco"
+  [webapps]="Webapps"
+  [webapps_note]="accesos del navegador"
   [menu_user]="📦 Revisar mis paquetes (los que YO instalé)"
   [menu_orphans]="👻 Limpiar huérfanos"
   [menu_cache]="🗑️  Limpiar cache pacman"
+  [menu_webapps]="🌐 Revisar webapps y atajos (solo lectura)"
   [menu_core]="🔒 Ver core omarchy (solo lectura)"
   [menu_quit]="Salir"
   [picker_user]="Tuyos · paquetes que NO vienen con omarchy"
@@ -151,6 +157,22 @@ list_orphans() {
   pacman -Qtdq 2>/dev/null || true
 }
 
+list_webapps() {
+  # User-owned desktop launchers whose command opens a browser web app.
+  # Output: desktop-file<TAB>name<TAB>command
+  local app_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications" desktop name command
+  shopt -s nullglob
+  for desktop in "$app_dir"/*.desktop; do
+    command=$(grep -m1 '^Exec=' "$desktop" 2>/dev/null | cut -d= -f2-)
+    case "$command" in
+      *omarchy-launch-webapp*|*omarchy-launch-or-focus-webapp*|*omarchy-webapp-handler*)
+        name=$(grep -m1 '^Name=' "$desktop" 2>/dev/null | cut -d= -f2-)
+        printf '%s\t%s\t%s\n' "$(basename "$desktop")" "${name:-$(basename "$desktop" .desktop)}" "$command"
+        ;;
+    esac
+  done
+}
+
 human_size() {
   # $1 = bytes; outputs e.g. "12.4 MB". Falls back to printf for portability.
   numfmt --to=iec-i --suffix=B --format='%.1f' "$1" 2>/dev/null || echo "${1}B"
@@ -205,10 +227,11 @@ show_overview() {
   core_file=$(mktemp); user_file=$(mktemp)
   categorize "$core_file" "$user_file"
 
-  local n_core n_user n_orphan n_cache_bytes
+  local n_core n_user n_orphan n_webapps n_cache_bytes
   n_core=$(wc -l < "$core_file")
   n_user=$(wc -l < "$user_file")
   n_orphan=$(list_orphans | wc -l)
+  n_webapps=$(list_webapps | wc -l)
   n_cache_bytes=$(cache_size_bytes)
 
   gum style --border rounded --padding "1 2" --margin "1 0" --border-foreground 212 \
@@ -217,6 +240,7 @@ show_overview() {
     "${C_GREEN}$(t core)${C_RESET}    $n_core $(t core_note)" \
     "${C_CYAN}$(t user)${C_RESET}           $n_user $(t user_note)" \
     "${C_YELLOW}$(t orphans)${C_RESET}       $n_orphan $(t orphans_note)" \
+    "${C_BLUE}$(t webapps)${C_RESET}        $n_webapps $(t webapps_note)" \
     "${C_MAGENTA}$(t cache)${C_RESET}    $(human_size "$n_cache_bytes") $(t cache_note)"
 
   rm -f "$core_file" "$user_file"
@@ -350,6 +374,12 @@ action_cache() {
   esac
 }
 
+action_show_webapps() {
+  local rows
+  rows=$(list_webapps | awk -F'\t' '{printf "%s  │  %s  │  %s\n", $2, $1, $3}')
+  [[ -n "$rows" ]] && printf '%s\n' "$rows" | gum pager || gum style --foreground 46 "$(t empty)"
+}
+
 action_show_core() {
   # Read-only listing — just to satisfy curiosity.
   local core_file user_file
@@ -364,19 +394,21 @@ action_show_core() {
 main_menu() {
   while true; do
     show_overview
-    local choice m_user m_orph m_cache m_core m_quit
+    local choice m_user m_orph m_cache m_webapps m_core m_quit
     m_user="$(t menu_user)"
     m_orph="$(t menu_orphans)"
     m_cache="$(t menu_cache)"
+    m_webapps="$(t menu_webapps)"
     m_core="$(t menu_core)"
     m_quit="$(t menu_quit)"
 
-    choice=$(gum choose "$m_user" "$m_orph" "$m_cache" "$m_core" "$m_quit") || exit 0
+    choice=$(gum choose "$m_user" "$m_orph" "$m_cache" "$m_webapps" "$m_core" "$m_quit") || exit 0
 
     case "$choice" in
       "$m_user")  action_user_packages ;;
       "$m_orph")  action_orphans ;;
       "$m_cache") action_cache ;;
+      "$m_webapps") action_show_webapps ;;
       "$m_core")  action_show_core ;;
       "$m_quit")  exit 0 ;;
     esac

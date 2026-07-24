@@ -24,6 +24,7 @@ Pacseek y bauh te dejan desinstalar paquetes, pero no saben qué viene de fábri
 - **📦 Tus paquetes** — instalaciones explícitas que NO están en el manifiesto de omarchy. Selección múltiple para remover.
 - **👻 Huérfanos** — dependencias huérfanas (`pacman -Qtdq`).
 - **🗑️ Cache pacman** — usa `paccache` para botar generaciones viejas o purgar archivos de paquetes ya desinstalados.
+- **🌐 Webapps** — inventario de solo lectura de accesos del navegador registrados como launchers locales.
 - **🔒 Core omarchy** — listado solo lectura, para ver qué vino con la distro.
 
 Toda acción destructiva muestra primero `pacman -Rs --print` y pide confirmación. Pacman mismo es la red de seguridad: rechaza remover cualquier cosa de la que aún dependa otro paquete.

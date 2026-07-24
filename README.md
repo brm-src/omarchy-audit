@@ -24,6 +24,7 @@ Pacseek and bauh let you uninstall packages, but they don't know what omarchy sh
 - **📦 Your packages** — explicit installs that are NOT in the omarchy manifest. Multi-select to remove.
 - **👻 Orphans** — orphaned dependencies (`pacman -Qtdq`).
 - **🗑️ Pacman cache** — wraps `paccache` to drop old generations or fully purge files for uninstalled packages.
+- **🌐 Web apps** — read-only inventory of browser shortcuts registered as local desktop launchers.
 - **🔒 Core omarchy** — read-only listing, just to see what came with the distro.
 
 Every destructive action runs `pacman -Rs --print` first and asks for confirmation. Pacman itself is the safety net: it refuses to remove anything still depended on.
