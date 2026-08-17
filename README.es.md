@@ -1,5 +1,9 @@
 # omarchy-audit
 
+<p align="center">
+  <a href="https://www.ko-fi.com/brmcl"><img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support me on Ko-fi" /></a>
+</p>
+
 > 📖 **Español** · [English](README.md)
 
 TUI interactiva para auditar y limpiar tu instalación de [omarchy](https://omarchy.org).
